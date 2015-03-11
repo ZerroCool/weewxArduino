@@ -42,7 +42,7 @@ void setup(void) {
   }
   // Start up the DS library
   sensors.begin();
-  sensors.setResolution(outsideThermometer, 9);
+  sensors.setResolution(outsideThermometer, 12);
   
   pinMode(13, OUTPUT);    
   Timer1.initialize(1000000); // set a timer of length 100000 microseconds (or 0.1 sec - or 10Hz => the led will blink 5 times, 5 cycles of on-and-off, per second)

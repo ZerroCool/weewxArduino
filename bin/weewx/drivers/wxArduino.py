@@ -1,11 +1,14 @@
 #!/usr/bin/env python
-# $Id: wxArduino.py 2766 2014-12-02 02:45:36Z tkeffer $
 
 """Driver for WxArduino data logger
 
+The clock is software, an interrupt service routine firing every second. 
+Time is sent as seconds since epoch.
+Sensors are 
+	BMP180 for baromter and temperature
+	1-wire for temperature
+	simulated for humidity and wind
 
-This driver does not support hardware record_generation.  It does support
-catchup on startup.
 """
 
 from __future__ import with_statement
@@ -31,7 +34,7 @@ def confeditor_loader():
 
 
 DEFAULT_PORT = '/dev/ttyUSB1'
-DEBUG_READ = 1
+DEBUG_READ = 0
 DEBUG_CHECKSUM = 0
 DEBUG_OPENCLOSE = 0
 
@@ -54,7 +57,7 @@ class ChecksumMismatch(weewx.WeeWxIOError):
             msg = "%s (%s)" % (msg, _fmt(buf))
         weewx.WeeWxIOError.__init__(self, msg)
 
-
+# this class is from cc3000.py, not altered for wxArduino yet
 class WxArduinoConfigurator(weewx.drivers.AbstractConfigurator):
     def add_options(self, parser):
         super(WxArduinoConfigurator, self).add_options(parser)
@@ -173,9 +176,9 @@ class WxArduinoConfigurator(weewx.drivers.AbstractConfigurator):
 
 
 class WxArduinoDriver(weewx.drivers.AbstractDevice):
-    """weewx driver that communicates with a WxArduino data logger."""
+    """weewx driver that communicates with a wxArduino data logger."""
 
-    # map arduino names to weewx names
+    # map arduino names in message to weewx names
     DEFAULT_LABEL_MAP = { 'TIMESTAMP': 'TIMESTAMP',
                           'TEMP OUT': 'outTemp',
                           'HUMIDITY': 'outHumidity',
@@ -195,8 +198,8 @@ class WxArduinoDriver(weewx.drivers.AbstractDevice):
     def __init__(self, **stn_dict):
         self.port = stn_dict.get('port', DEFAULT_PORT)
         self.polling_interval = float(stn_dict.get('polling_interval', 15))
-        self.model = stn_dict.get('model', 'WxArduino')
-        self.use_station_time = stn_dict.get('use_station_time', False)
+        self.model = stn_dict.get('model', 'wxArduino')
+        self.use_station_time = stn_dict.get('use_station_time', True)
         self.max_tries = int(stn_dict.get('max_tries', 5))
         self.retry_wait = int(stn_dict.get('retry_wait', 10))
         self.label_map = stn_dict.get('label_map', self.DEFAULT_LABEL_MAP)
@@ -220,8 +223,6 @@ class WxArduinoDriver(weewx.drivers.AbstractDevice):
 
         global DEBUG_READ
         DEBUG_READ = int(stn_dict.get('debug_read', 0))
-        global DEBUG_CHECKSUM
-        DEBUG_CHECKSUM = int(stn_dict.get('debug_checksum', 0))
         global DEBUG_OPENCLOSE
         DEBUG_OPENCLOSE = int(stn_dict.get('debug_openclose', 0))
 
@@ -237,15 +238,15 @@ class WxArduinoDriver(weewx.drivers.AbstractDevice):
                 data = self._parse_current(values)
                 ts = data.get('TIMESTAMP')
                 if ts is not None:
-                    if not self.use_station_time:
-                        ts = int(time.time() + 0.5)
                     packet = {'dateTime': ts, 'usUnits': units}
                     packet.update(data)
                     logdbg("packet is %s" % packet)
                     #self._augment_packet(packet)
                     yield packet
-                logdbg("time is %d" % ts)
-                #self.set_time() - WMM this was used before adding 1 sec ISR to Arduino code
+		timeDrift = ts - time.time()
+                if abs(timeDrift) > 2: # clock has drifted
+		    loginf("Instrument time has drifted %d seconds. Setting it." % timeDrift)
+		    self.set_time()
                 if self.polling_interval:
                     time.sleep(self.polling_interval)
             except (serial.serialutil.SerialException, weewx.WeeWxIOError), e:
@@ -269,7 +270,7 @@ class WxArduinoDriver(weewx.drivers.AbstractDevice):
     def getTime(self):
         with WxArduino(self.port) as station:
             v = station.get_time()
-        return float(v) # WMM_to_ts(v)
+        return float(v) # WMM was: _to_ts(v)
 
     def setTime(self):
         with WxArduino(self.port) as station:
@@ -336,18 +337,13 @@ class WxArduinoDriver(weewx.drivers.AbstractDevice):
 
     def _init_station(self):
         with WxArduino(self.port) as station:
-	    # WMM
-	    logdbg('check if its there')
-	    station.write("HELLO")
-	    buf = station.serial_port.readline()
-	    logdbg(buf)
             station.flush()
             #station.set_echo()
             logdbg('get archive interval')
             self._archive_interval = station.get_interval()
             logdbg('get header')
             self.header = self._parse_header(station.get_header())
-            logdbg('WMM do not get units')
+	    # units of measure currenty hardcoded in Arduino code
             self.units = 'METRIC' #station.get_units()
 
     def _augment_packet(self, packet):
@@ -406,6 +402,7 @@ def _format_bytes(buf):
 def _fmt(buf):
     return filter(lambda x: x in string.printable, buf)
 
+# this is not implemented on Arduino yet
 # calculate the crc for a string using CRC-16-CCITT
 # http://bytes.com/topic/python/insights/887357-python-check-crc-frame-crc-16-ccitt
 def _crc16(data):
@@ -553,17 +550,7 @@ class WxArduino(object):
         values = data.split(',')
         return values
 
-    def get_memory_status(self):
-        data = self.command("MEM?")
-        logdbg("memory status: %s" % _fmt(data))
-        return data
-
-    def clear_memory(self):
-        logdbg("clear memory")
-        data = self.command("MEM=CLEAR")
-        if data != 'OK':
-            raise weewx.WeeWxIOError("Failed to clear memory: %s" % _fmt(data))
-
+    # this is copied from cc3000.py. Not implemented in wxArduino (yet?)
     def gen_records(self, nrec):
         """generator function for getting records from the device"""
         cmd = "DOWNLOAD"
@@ -600,7 +587,8 @@ class WxArduino(object):
     def set_time(self):
         ts = time.time()
         tstr = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(ts))
-        s = "TIME=%s,%d" % (tstr, ts)
+        # left tstr passing in for now.
+        s = "TIME=%s,%d" % (tstr, ts+1)
         data = self.command(s)
         logdbg("set time to %s (%d) returned %s" % (tstr, ts, data))
         if data != 'OK':
@@ -611,6 +599,7 @@ class WxArduino(object):
         data = self.command("UNITS?")
         return data
 
+    # not used by wxArduino
     def set_units(self, units='METRIC'):
         logdbg("set units to %s" % units)
         data = self.command("UNITS=%s" % units)
@@ -644,7 +633,7 @@ class WxArduinoConfEditor(weewx.drivers.AbstractConfEditor):
     # Serial port such as /dev/ttyS0, /dev/ttyUSB0, or /dev/cuaU0
     port = /dev/ttyUSB0
 
-    # The station model, e.g., CC3000 or CC3000R
+    # The station model
     model = WxArduino
 
     # The driver to use:
